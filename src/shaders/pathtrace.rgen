@@ -1,0 +1,182 @@
+/* Copyright (c) 2014-2018, NVIDIA CORPORATION. All rights reserved.
+ *
+ * Redistribution and use in source and binary forms, with or without
+ * modification, are permitted provided that the following conditions
+ * are met:
+ *  * Redistributions of source code must retain the above copyright
+ *    notice, this list of conditions and the following disclaimer.
+ *  * Redistributions in binary form must reproduce the above copyright
+ *    notice, this list of conditions and the following disclaimer in the
+ *    documentation and/or other materials provided with the distribution.
+ *  * Neither the name of NVIDIA CORPORATION nor the names of its
+ *    contributors may be used to endorse or promote products derived
+ *    from this software without specific prior written permission.
+ *
+ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS ``AS IS'' AND ANY
+ * EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+ * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
+ * PURPOSE ARE DISCLAIMED.  IN NO EVENT SHALL THE COPYRIGHT OWNER OR
+ * CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL,
+ * EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO,
+ * PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR
+ * PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY
+ * OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+ * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+ * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ */
+
+#version 460
+#extension GL_GOOGLE_include_directive : enable
+#extension GL_EXT_ray_tracing : require  // This is about ray tracing
+
+// Special extensions to debug groups, warps, SM, ...
+#extension GL_KHR_shader_subgroup_basic : require
+#extension GL_NV_shader_sm_builtins : require
+// Align structure layout to scalar
+#extension GL_EXT_scalar_block_layout : enable
+
+#define USE_INIT_PAYLOAD
+#define USE_STOREIMAGE
+#include "headers/layouts.glsl"
+#include "headers/raycommon.glsl"
+
+
+layout(location = 0) rayPayloadEXT HitPayload prd;
+
+const float eps=1e-9;
+
+float atan2(in float y, in float x){
+    return x == 0.0 ? sign(y)*M_PI/2 : atan(y, x);
+}
+void main()
+{
+  ivec2 sizeImage  = ivec2(gl_LaunchSizeEXT.xy);
+  ivec2 coordImage = ivec2(gl_LaunchIDEXT.xy);
+
+  vec3 hitValues = vec3(0);
+  vec4 hitStorks[3];
+  for(int i=0;i<3;i++){
+    hitStorks[i]=vec4(0.0);
+  }
+  int  smpl      = 0;
+
+  CameraMatrices cameraMatrices;
+  cameraMatrices.view=uniforms.view;
+  cameraMatrices.proj=uniforms.proj;
+  cameraMatrices.viewInverse=uniforms.viewInverse;
+  cameraMatrices.projInverse=uniforms.projInverse;
+  float exist=1.0f;
+
+  float DoP=0.0f;
+  float ALoP=0.0f;
+  float ToP=0.0f;
+  for(; smpl < uniforms.maxSamples; ++smpl)
+  {
+    prd = InitializePayload(coordImage, sizeImage, cameraMatrices, uniforms.frame * uniforms.maxSamples + smpl);
+
+    // Trace the scene
+    uint  rayFlags  = gl_RayFlagsNoneEXT;
+    float tMin      = 0.00001;
+    float tMax      = 1e32;
+    vec3  curWeight = vec3(1);
+
+
+
+    for(int depth = 0; depth < uniforms.maxDepth; depth++)
+    {
+      prd.contribution = vec3(0);
+      prd.storks=vec4(0.0);
+      traceRayEXT(topLevelAS,        // acceleration structure
+                  rayFlags,          // rayFlags
+                  0xFF,              // cullMask
+                  0,                 // sbtRecordOffset
+                  0,                 // sbtRecordStride
+                  0,                 // missIndex
+                  prd.rayOrigin,     // ray origin
+                  tMin,              // ray min range
+                  prd.rayDirection,  // ray direction
+                  tMax,              // ray max range
+                  0                  // payload (location = 0)
+      );
+
+      // Adding contribution from hit
+      hitValues += prd.contribution;
+
+      
+      // Removing fireflies
+      {
+        float lum = dot(hitValues, vec3(0.212671f, 0.715160f, 0.072169f));
+        if(lum > uniforms.fireflyClampThreshold)
+          hitValues *= uniforms.fireflyClampThreshold / lum;
+      }
+
+      
+      vec4 storks=vec4(0.0);
+      for(int i=0;i<3;i++){
+        storks = prd.albedo[i] * prd.storks;
+        hitStorks[i] += storks;
+      }
+      
+      for(int i=0;i<1;i++){
+        vec3 l = vec3(hitStorks[0][i],hitStorks[1][i],hitStorks[2][i]); 
+        float lum = dot(l, vec3(0.212671f, 0.715160f, 0.072169f));
+        if(lum > uniforms.fireflyClampThreshold){
+              hitStorks[0][i] *= uniforms.fireflyClampThreshold / lum;
+              hitStorks[1][i] *= uniforms.fireflyClampThreshold / lum;
+              hitStorks[2][i] *= uniforms.fireflyClampThreshold / lum;
+        }
+      }
+        
+        float s0=prd.storks.x;
+	    float s1=prd.storks.y;
+	    float s2=prd.storks.z;
+	    float s3=prd.storks.w;
+
+	    DoP+=sqrt(s1*s1+s2*s2+s3*s3)/(s0+eps);
+	    ALoP+=clamp(abs(atan2(s2, s1))*M_1_PI,0.0,1.0);
+
+	    float rDoPL=sqrt(s1*s1+s2*s2);
+	    float rDoPC=abs(s3);
+
+        float t = atan2(rDoPC, rDoPL)*M_1_PI;
+        t=clamp(t,0.0,1.0);
+	    ToP+=t;
+      // Russian roulette termination
+//      if(depth > 0)
+//      {
+//        float pcont = max(prd.weight.x, max(prd.weight.y, prd.weight.z));
+//        if(rnd(prd.seed) >= pcont)
+//          break;
+//        prd.weight /= pcont;
+//        prd.muller /= pcont;
+//      }
+      if(has_flag(prd.flags, FLAG_MISS) && depth==0 ){
+        exist = 0.0f;
+      }
+      if(has_flag(prd.flags, FLAG_DONE))
+        break;
+
+    }
+  }
+  hitStorks[0].x= max(0.0,hitStorks[0].x);
+  hitStorks[1].x= max(0.0,hitStorks[1].x);
+  hitStorks[2].x= max(0.0,hitStorks[2].x);
+
+
+  // Average result
+  hitValues = hitValues / uniforms.maxSamples;
+  for(int i=0;i<3;i++){
+    hitStorks[i]= hitStorks[i] / uniforms.maxSamples;
+  }
+  DoP = DoP / uniforms.maxSamples;
+  ALoP = ALoP / uniforms.maxSamples;
+  ToP =  ToP / uniforms.maxSamples;
+
+  vec4 result=vec4(hitStorks[0].x, hitStorks[1].x, hitStorks[2].x, exist);
+  vec4 storks=vec4(DoP ,ALoP, ToP, 1.0);
+  // Do accumulation over time
+  StoreResult(resultImage, coordImage, uniforms.frame, result);
+  StoreResult(storksImage, coordImage, uniforms.frame, storks);
+  StoreResult(pathTraceImage, coordImage, uniforms.frame, hitValues);
+
+}

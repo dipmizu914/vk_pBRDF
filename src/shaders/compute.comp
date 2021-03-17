@@ -1,0 +1,19 @@
+#version 460
+#extension GL_GOOGLE_include_directive : enable
+#extension GL_EXT_ray_tracing : require          // This is about ray tracing
+#extension GL_EXT_nonuniform_qualifier : enable  // To access unsized descriptor arrays
+// Align structure layout to scalar
+#extension GL_EXT_scalar_block_layout : enable
+
+// C++ shared structure: RtxState
+#include "headers/struct.glsl"
+// Payload and other structures
+#include "headers/globals.glsl"
+#include "headers/layouts.glsl"
+layout(local_size_x = 32, local_size_y = 1, local_size_z = 1) in;
+
+void main() {
+	uvec2 pixelCoord = gl_GlobalInvocationID.xy;
+	ivec2 coordImage = ivec2(gl_GlobalInvocationID.xy);
+
+}
