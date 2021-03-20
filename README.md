@@ -18,7 +18,7 @@ The code has not been tested on other platforms.
 ## 3. Setup
  1. Clone this repository as follows,
    ```
-   git clone https://github.com/dipmizu914/vk_template.git --recurse-submodules
+   git clone https://github.com/dipmizu914/vk_pBRDF.git --recurse-submodules
    ```
  2. Build by using CMake.
 
